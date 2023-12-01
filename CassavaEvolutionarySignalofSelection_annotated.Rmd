@@ -7,7 +7,7 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-setwd("C:/Users/evanl/Downloads/")
+setwd("path/to/repo")
 library(ggplot2)
 library(dplyr)
 library(data.table)
