@@ -1,0 +1,1140 @@
+---
+title: "Cassava Evolutionary Signal of Selection"
+author: "EvanLong"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/evanl/Downloads/")
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(MASS)
+library(plot3D)
+library(RColorBrewer)
+library(topGO)
+library(ALL)
+```
+
+
+#Read in PAML results and gene stats and do some filtering
+```{r}
+#This block is mainly focused on processing and analyzing transcript data. It starts by reading various data files, then joins, mutates, and filters data based on multiple criteria. At the end, it saves the result and provides histograms for visualization.
+
+
+# Load required libraries
+library(data.table)
+library(dplyr)
+
+# === DATA LOADING ===
+
+# Read transcript stats data 
+Transcript_stats <- read.table("CassavaV7.1_Transcipts.stat", header=T)
+colnames(Transcript_stats) <- c("Transcript","UTR5","UTR3","CDS","Start_Codon","Stop_Codon")
+
+# Read the depth information representing how many genomes were aligned for each transcript
+Depthlist <- read.table("DepthList.txt")
+colnames(Depthlist) <- c("Transcript","Alignment_Depth")
+
+# Read dNdS and Likelihood ratio test results
+LRT_models <- fread("LRT_models.txt", fill = T, header = F)
+colnames(LRT_models) <- c("Transcript","TL","FvsM0","FvsNeutral","dNdSTree","dNdSCassava")
+
+# === DATA JOINING ===
+
+# Join Depthlist to LRT_models
+LRT_models <- inner_join(LRT_models, Depthlist)
+
+# Join Transcript_stats to LRT_models
+LRT_models <- inner_join(LRT_models, Transcript_stats)
+
+# Cap dNdS outliers for visibility. Values greater than 2 are considered beyond neutral.
+LRT_models$dNdSCassava[LRT_models$dNdSCassava > 2] <- 2
+
+# Calculate p-values from LRT models and calculate differences in dNdS
+LRT_models <- mutate(LRT_models, 
+                    pval_m0=-1*log10(dchisq(abs(FvsM0),1)), 
+                    pval_neutral=-log10(dchisq(abs(FvsNeutral),1)), 
+                    delta_dNdS=dNdSTree-dNdSCassava)
+
+# Save LRT models data to an output file
+write.table(LRT_models,"GeneV7_Conservation.txt",sep="\t",quote=F,col.names = T,row.names = F)
+
+# Extract chromosome and gene information from Transcript field
+LRT_models <- cbind.data.frame(Chromosome=substr(LRT_models$Transcript,7,8), 
+                               Gene=substr(LRT_models$Transcript,1,15),
+                               LRT_models)
+
+# === DATA EXPLORATION ===
+
+# Group by genes and check statistics for transcripts
+Transcript_Investigation <- LRT_models %>% 
+                            group_by(Gene) %>% 
+                            filter(n()>1) %>% 
+                            mutate(dNdS_range=diff(range(dNdSCassava)), 
+                                   dNdS_mean=mean(dNdSCassava), 
+                                   dNds_difffromMean=dNdSCassava-dNdS_mean)
+
+# Plot histograms to visualize dNdS ranges and differences
+hist(Transcript_Investigation$dNdS_range, breaks = 100, xlab = "dNdS", main="Max Difference between Transcripts")
+hist(Transcript_Investigation$dNds_difffromMean, breaks = 200, xlab = "dNdS", main="Difference from Transcripts mean dNdS")
+
+# Plot histograms for UTR lengths
+hist(LRT_models$UTR5, xlim = c(0,2000), breaks=500, col= rgb(0, 0, 1, 0.3), main="Transcripts UTR Lengths")
+hist(LRT_models$UTR3, xlim = c(0,2000), breaks=500, col= rgb(1, 0, 0, 0.3), add = T)
+legend("topright", legend = c("5'UTR","3'UTR"), col=c("Blue","Red"), lwd=4, cex = 2)
+
+# === DATA FILTERING ===
+
+# Filter transcripts based on UTR presence and other criteria
+Transcript_filtered <- LRT_models %>% 
+                       group_by(Gene) %>% 
+                       filter(as.numeric(UTR5 > 0) == max(as.numeric(UTR5 > 0))) %>% 
+                       filter(as.numeric(UTR3 > 0) == max(as.numeric(UTR3 > 0)))
+
+# Further filters
+Transcript_filtered <- Transcript_filtered %>% 
+                       group_by(Gene) %>% 
+                       filter(Alignment_Depth == max(Alignment_Depth)) 
+Transcript_filtered <- Transcript_filtered %>% 
+                       group_by(Gene) %>% 
+                       filter(dNdSCassava == min(dNdSCassava) | is.na(sum(dNdSCassava))) 
+
+# Filter based on presence of start and stop codons
+Transcript_filtered <- Transcript_filtered %>% 
+                       group_by(Gene) %>% 
+                       filter(as.numeric(Start_Codon == "ATG") == max(as.numeric(Start_Codon == "ATG"))) %>% 
+                       filter(as.numeric(Stop_Codon == "TAA" | Stop_Codon == "TAG" | Stop_Codon == "TGA") == max(as.numeric(Stop_Codon == "TAA" | Stop_Codon == "TAG" | Stop_Codon == "TGA")))
+
+# Select the longest transcript and take a random sample of 1
+Transcript_filtered <- Transcript_filtered %>% 
+                       group_by(Gene) %>% 
+                       filter((CDS + UTR5 + UTR3) == max(CDS + UTR5 + UTR3)) %>% 
+                       sample_n(1)
+
+# Filter genes that have UTR and are present in more than 1 species
+Genes_filter <- Transcript_filtered %>% 
+                filter(UTR5 > 0 & UTR3 > 0) 
+Genes_filter <- Genes_filter %>% 
+                filter(Alignment_Depth > 1) 
+
+# Save the filtered genes to an output file
+write.table(Genes_filter,"26k_filtered_genes_dnds.tsv",quote=F,col.names=T,sep="\t",row.names=F)
+
+# Plot histogram of Alignment Depth for the filtered genes
+hist(Genes_filter$Alignment_Depth, breaks = 50)
+
+
+```
+
+
+#Read in GENESPACE pangenome output and define orthogroups
+```{r}
+
+# === DATA LOADING ===
+
+# Read the GENESPACE pangenome output for long-read genomes to identify Orthogroups
+Pangenome <- fread("CassavaV7_pangenomeDB.txt.gz")
+
+# Filter orthogroups to include only those that have the "CassavaV7" genome
+Pangenome <- Pangenome %>% group_by(og) %>% filter("CassavaV7" %in% genome)
+
+# Calculate the occurrence of each orthogroup across unique genomes
+OG_Occurrence <- Pangenome %>% 
+                 group_by(og) %>% 
+                 summarise(length(unique(genome)))
+colnames(OG_Occurrence)[2] <- "# Species"
+
+# === DATA VISUALIZATION ===
+
+# Plot histogram showing the distribution of ortholog groups across different number of species
+ggplot(OG_Occurrence, aes(x=`# Species`)) +
+  geom_histogram(binwidth = 1, fill="#CC6600") +
+  ggtitle("Ortholog Groups") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, size=25),
+        text = element_text(size = 20),
+        axis.title.x = element_text(size=18)) +
+  scale_x_continuous(breaks = round(seq(1, 10, by = 1), 1)) 
+
+# === ORTHOLOG GROUP INVESTIGATION ===
+
+# Extract ortholog groups and gene IDs
+OGs <- Pangenome[, c(4, 12)]
+OGs$id <- substr(OGs$id, 1, 15)
+colnames(OGs) <- c("og", "Gene")
+
+# Join the OGs data with the previously filtered genes (from the previous R script)
+LRT_OG <- distinct(inner_join(OGs, Genes_filter))
+
+# Filter out rows with NA values in the 'TL' column
+LRT_OG <- LRT_OG[!is.na(LRT_OG$TL), ]
+
+og8 <- OG_Occurrence %>% filter(`# Species`>=8)
+LRT_OG %>% filter(og %in% og8$og)
+18867/26135
+```
+
+#plot paralogous divergence in conservation
+```{r}
+#The GENESPACE pangenome output is loaded into R.
+#Orthogroups containing the genome "CassavaV7" are filtered.
+#The distribution of orthogroups across different numbers of species is visualized with a histogram.
+#Orthogroups and their associated gene IDs are then extracted.
+#This orthogroup data is joined with a previously filtered set of genes (assuming this set of genes was derived from your previous R script).
+#Finally, rows containing NA values in the 'TL' column of the joined data are filtered out.
+
+LRT_OG_copies <- LRT_OG %>% group_by(og) %>% filter(n() > 1)
+# 
+LRT_OG_Homeologs <- LRT_OG_copies %>%  group_by(og) %>% filter(length(unique(Chromosome))>1)
+LRT_OG_Homeologs <- LRT_OG_Homeologs %>% group_by(og) %>% mutate(dNdS_range=diff(range(dNdSCassava))) %>% mutate(dNdS_mean=mean(dNdSCassava)) %>% mutate(dNds_difffromMean=dNdSCassava-dNdS_mean)
+LRT_OG_copies <- LRT_OG_copies %>% group_by(og) %>% mutate(dNdS_range=diff(range(dNdSCassava))) %>% mutate(dNdS_mean=mean(dNdSCassava)) %>% mutate(dNds_difffromMean=dNdSCassava-dNdS_mean)
+
+LRT_OG_singletons <- LRT_OG %>% group_by(og) %>% filter(n() == 1)
+
+
+## Get Correlation across Paralogues
+LRT_OG_copies <- LRT_OG_copies %>% group_by(og) %>% mutate(IsMostConservedparalogue=dNdSCassava==max(dNdSCassava)) %>% mutate(IsLeastConservedparalogue=dNdSCassava==min(dNdSCassava)) 
+sum(LRT_OG_copies$IsMostConservedparalogue,na.rm = T)
+Paralogue_dNdS <- LRT_OG_copies %>% group_by(og) %>% summarise(max=max(dNdSCassava),min=min(dNdSCassava), pval=(max(pval_m0)))
+Paralogue_dNdS<- na.omit(Paralogue_dNdS)
+Paralogue_dNdS$pval[Paralogue_dNdS$pval>10] <- 10
+ggplot(Paralogue_dNdS,aes(x=min,y=max,col=pval))+
+  geom_point(aes(col=pval))+
+  xlab("Paralogue min(dNdS) copy")+
+  ylab("Paralogue max(dNdS) copy")+
+  ggtitle("Paralogue Conservation; R=0.45")+
+  scale_color_gradient2(midpoint = 3, 
+                        low = "blue", mid = "white",
+                        high = "red", space = "Lab" )+
+  xlim(0,2)
+
+
+```
+
+
+
+
+
+##Used derived allele frequencies to calculate RVIS and Deleterious RVIS
+```{r}
+# Load required libraries
+library(data.table)
+library(dplyr)
+library(ggplot2)
+
+# === DATA LOADING ===
+
+#Read in Derived Allele Frequency table to begin calculating RVIS (Residual variation index score)
+DAF_Matrix <- fread("26k_genes_DAF.tsv.gz")
+colnames(DAF_Matrix)
+#Make sure to exclude any fixed sites
+DAF_Matrix <- DAF_Matrix[DAF_Matrix$Ref_Freq !=1 & DAF_Matrix$Ref_Freq !=0,]
+#Calculate MAF
+DAF_Matrix <- DAF_Matrix %>% mutate(MAF = Alt_Freq)
+DAF_Matrix$MAF[DAF_Matrix$MAF>0.5] <- 1-DAF_Matrix$MAF[DAF_Matrix$MAF>0.5]
+
+Get_RVIS <- function(Full_matrix,Transcript,Type="NS",MAF_cutoff=0.05){
+  if(Type=="NS"){
+    Functional_count <- sum(Full_matrix$Transcript == Transcript & Full_matrix$VARIANT_TYPE!="SYNONYMOUS" & Full_matrix$MAF > MAF_cutoff)
+    Total_count <- sum(Full_matrix$Transcript == Transcript & Full_matrix$MAF > MAF_cutoff)
+    
+    return(c(Functional_count,Total_count))
+  }
+  else{
+    Functional_count <- sum(Full_matrix$Transcript == Transcript & Full_matrix$SIFT_SCORE < 0.05 & Full_matrix$rate < 0.5 & Full_matrix$MAF > MAF_cutoff, na.rm=T)
+    Total_count <- sum(Full_matrix$Transcript == Transcript)
+    return(c(Functional_count,Total_count))
+  }
+}
+
+###RVIS MAF=0.01
+RVIS <- t(vapply(unique(DAF_Matrix$Transcript), function(x) Get_RVIS(DAF_Matrix,x,"NS", 0.01), FUN.VALUE = integer(2)))
+RVIS_line_maf1 <- lm(RVIS[,1] ~ RVIS[,2])
+RVIS_residmaf1 <- studres(RVIS_line_maf1)
+quantile_colors <- rep(1,length(RVIS_residmaf1))
+quantile_colors[RVIS_residmaf1 < quantile(RVIS_residmaf1, 0.10)] <- 2
+quantile_colors[RVIS_residmaf1 > quantile(RVIS_residmaf1, 0.90)] <- 3
+plot(RVIS[,2],RVIS[,1], col=quantile_colors, main = "Gene RVIS", xlab = "Total SNPs",ylab = "Nonsyn (MAF > 1%)")
+abline(RVIS_line_maf1)
+colnames(RVIS) <- c("NonSyn","Total_Mutations")
+write.table(RVIS,"RVIS_maf1.tsv",row.names = T, col.names = T, sep="\t",quote=F)
+RVIS_maf1 <- RVIS
+
+
+###RVIS MAF=0.05
+RVIS <- t(vapply(unique(DAF_Matrix$Transcript), function(x) Get_RVIS(DAF_Matrix,x,"NS", 0.05), FUN.VALUE = integer(2)))
+RVIS_line_maf5 <- lm(RVIS[,1] ~ RVIS[,2])
+RVIS_residmaf5 <- studres(RVIS_line_maf5)
+quantile_colors <- rep(1,length(RVIS_residmaf5))
+quantile_colors[RVIS_residmaf5 < quantile(RVIS_residmaf5, 0.10)] <- 2
+quantile_colors[RVIS_residmaf5 > quantile(RVIS_residmaf5, 0.90)] <- 3
+plot(RVIS[,2],RVIS[,1], col=quantile_colors, main = "Gene RVIS", xlab = "Total SNPs",ylab = "Nonsyn (MAF > 1%)")
+abline(RVIS_line_maf1)
+colnames(RVIS) <- c("NonSyn","Total_Mutations")
+write.table(RVIS,"RVIS_maf5.tsv",row.names = T, col.names = T, sep="\t",quote=F)
+RVIS_maf5 <- RVIS
+
+
+###RVIS Del MAF=0.01
+RVIS_del <- t(vapply(unique(DAF_Matrix$Transcript), function(x) Get_RVIS(DAF_Matrix,x,"Del", 0.01), FUN.VALUE = integer(2)))
+RVIS_line <- lm(RVIS_del[,1] ~ RVIS_del[,2])
+RVIS_resid <- studres(RVIS_line)
+quantile_colores <- rep(1,length(RVIS_resid))
+quantile_colores[RVIS_resid < quantile(RVIS_resid, 0.10)] <- 2
+quantile_colores[RVIS_resid > quantile(RVIS_resid, 0.90)] <- 3
+plot(RVIS_del[,2],RVIS_del[,1], col=quantile_colores, main = "Gene RVIS", xlab = "Total SNPs",ylab = "Number Del sites (MAF > 5%)")
+abline(RVIS_line)
+colnames(RVIS_del) <- c("NonSyn","Total_Mutations")
+write.table(RVIS_del,"RVISDel_MAF1.tsv",row.names = T, col.names = T, sep="\t",quote=F)
+RVIS_Del_MAF1 <- RVIS_del
+
+###RVIS Del MAF=0.05
+RVIS_del <- t(vapply(unique(DAF_Matrix$Transcript), function(x) Get_RVIS(DAF_Matrix,x,"Del", 0.05), FUN.VALUE = integer(2)))
+RVIS_line <- lm(RVIS_del[,1] ~ RVIS_del[,2])
+RVIS_resid <- studres(RVIS_line)
+quantile_colores <- rep(1,length(RVIS_resid))
+quantile_colores[RVIS_resid < quantile(RVIS_resid, 0.05)] <- 2
+quantile_colores[RVIS_resid > quantile(RVIS_resid, 0.95)] <- 3
+plot(RVIS_del[,2],RVIS_del[,1], col=quantile_colores, main = "Gene RVIS", xlab = "Total SNPs",ylab = "Number Del sites (MAF > 5%)")
+abline(RVIS_line)
+colnames(RVIS_del) <- c("NonSyn","Total_Mutations")
+write.table(RVIS_del,"RVISDel_MAF5.tsv",row.names = T, col.names = T, sep="\t",quote=F)
+RVIS_Del_MAF5 <- RVIS_del
+
+
+RVIS_Summary <- cbind.data.frame(rownames(RVIS_maf1),RVIS_maf1, RVIS_maf5, RVIS_Del_MAF1, RVIS_Del_MAF5)[,c(1,3,2,4,6,8)]
+colnames(RVIS_Summary) <- c("Transcript","Total_SNPs","NonSyn_MAF0.01","NonSyn_MAF0.05","Del_MAF0.01","Del_MAF0.05")
+RVIS_resid <- cbind(Nonsyn_Maf1_resid = studres(lm(RVIS_Summary[,3] ~ RVIS_Summary[,2])),Nonsyn_Maf5_resid = studres(lm(RVIS_Summary[,4] ~ RVIS_Summary[,2])),Del_Maf1_resid = studres(lm(RVIS_Summary[,5] ~ RVIS_Summary[,2])),Del_Maf5_resid = studres(lm(RVIS_Summary[,6] ~ RVIS_Summary[,2])))
+RVIS_Summary <- cbind.data.frame(RVIS_Summary,RVIS_resid)
+
+quantile_colores <- rep(1,length(RVIS_Summary$Nonsyn_Maf5_resid))
+quantile_colores[RVIS_Summary$Nonsyn_Maf5_resid < quantile(RVIS_Summary$Nonsyn_Maf5_resid, 0.01)] <- 2
+quantile_colores[RVIS_Summary$Nonsyn_Maf5_resid > quantile(RVIS_Summary$Nonsyn_Maf5_resid, 0.99)] <- 3
+plot(RVIS_Summary$Total_SNPs, RVIS_Summary$NonSyn_MAF0.05, col=quantile_colores, main = "Gene RVIS", xlab = "Total SNPs",ylab = "Number Del sites (MAF > 5%)")
+abline(lm(RVIS_Summary$NonSyn_MAF0.05 ~ RVIS_Summary$Total_SNPs))
+
+quantile_colores <- rep(1,length(RVIS_Summary$Del_Maf5_resid))
+quantile_colores[RVIS_Summary$Del_Maf5_resid < quantile(RVIS_Summary$Del_Maf5_resid, 0.01)] <- 2
+quantile_colores[RVIS_Summary$Del_Maf5_resid > quantile(RVIS_Summary$Del_Maf5_resid, 0.99)] <- 3
+plot(RVIS_Summary$Total_SNPs, RVIS_Summary$Del_MAF0.05, col=quantile_colores, main = "Gene RVIS", xlab = "Total SNPs",ylab = "Number Del sites (MAF > 5%)")
+abline(lm(RVIS_Summary$Del_MAF0.05 ~ RVIS_Summary$Total_SNPs))
+
+write.table(RVIS_Summary,"RVIS_Summary.tsv",row.names=F,col.names=T,sep="\t",quote=F)
+
+RVIS_Summary <- read.table("RVIS_Summary.tsv",header = T)
+Gene_Conservation <- full_join(RVIS_Summary,LRT_OG)
+
+Mk_tests <- read.table("Mktest_Summary.tsv",header=T)
+Gene_Conservation <- full_join(Gene_Conservation,Mk_tests)
+write.table(Gene_Conservation,"Gene_Conservation_Summary.tsv",quote=F,sep="\t",col.names=T,row.names=F)
+
+```
+
+
+#Plot RVIS
+```{r}
+# Load the Gene Conservation summary data
+Gene_Conservation <- read.table("Gene_Conservation_Summary.tsv", header = T)
+
+# Set global graphical parameters for the plots
+par(cex=1, cex.main=2, cex.lab = 1.5, cex.sub=0.8)
+
+# === RVIS PLOT ===
+
+# Fit a linear model for NonSynonymous SNPs at MAF > 1%
+NS01 <- lm(Gene_Conservation$NonSyn_MAF0.01 ~ Gene_Conservation$Total_SNPs)
+
+# Get residuals and standardized residuals from the linear model
+test <- residuals(NS01)
+test1 <- studres(NS01)
+
+# Create color groups based on quantiles of standardized residuals
+quantile_colors <- rep(1, length(test1))
+quantile_colors[test1 < quantile(test1, 0.05)] <- 2  # Bottom 5%
+quantile_colors[test1 > quantile(test1, 0.95)] <- 3  # Top 5%
+
+# Plot RVIS: NonSynonymous SNPs vs Total SNPs with quantile-based coloring
+plot(Gene_Conservation$Total_SNPs, Gene_Conservation$NonSyn_MAF0.01, 
+     col=c("black", "#D55E00", "#009E73")[quantile_colors], 
+     main = "RVIS", xlab = "Total SNPs", ylab = "Nonsyn SNPS(MAF > 1%)")
+abline(NS01)  # Add regression line
+
+# === DRVIS PLOT ===
+
+# Fit a linear model for Deleterious SNPs at MAF > 1%
+Del01 <- lm(Gene_Conservation$Del_MAF0.01 ~ Gene_Conservation$Total_SNPs)
+
+# Get residuals and standardized residuals from the linear model
+test <- residuals(Del01)
+test1 <- studres(Del01)
+
+# Create color groups based on quantiles of standardized residuals
+quantile_colors <- rep(1, length(test1))
+quantile_colors[test1 < quantile(test1, 0.05)] <- 2  # Bottom 5%
+quantile_colors[test1 > quantile(test1, 0.95)] <- 3  # Top 5%
+
+# Plot DRVIS: Deleterious SNPs vs Total SNPs with quantile-based coloring
+plot(Gene_Conservation$Total_SNPs, Gene_Conservation$Del_MAF0.01, 
+     col=c("black", "#D55E00", "#009E73")[quantile_colors], 
+     main = "DRVIS", xlab = "Total SNPs", ylab = "Deleterious SNPs (MAF > 1%)")
+abline(Del01)  # Add regression line
+
+```
+
+
+
+
+
+#GO TERM Encrchment
+```{r}
+# Adjust dNdS values in the Gene_Conservation data
+Gene_Conservation$delta_dNdS[Gene_Conservation$delta_dNdS > 2] <- 2
+Gene_Conservation$dNdSTree[Gene_Conservation$dNdSTree > 2] <- 2
+
+# Load the GO terms associated with genes
+MeGO <- read.table("Mesculenta_GOterms_simple.tsv", header = T)
+colnames(MeGO)[1:2] <- c("Gene", "GOTerm")
+
+# Load GO term groups
+Goterms <- fread("GO_Groups.tsv", header = F)
+colnames(Goterms) <- c("Go.Term", "Function")
+
+# Consolidate GO terms associated with each gene
+MeGO_Consolidate <- MeGO %>%
+  group_by(Gene) %>%
+  summarise(GO = paste0(GOTerm, collapse = ","))
+MeGO_list <- MeGO_Consolidate$GO
+names(MeGO_list) <- MeGO_Consolidate$Gene
+write.table(MeGO_list, "MeGO_list.txt", sep = "\t", quote = F, col.names = F, row.names = T)
+geneID2GO <- readMappings("MeGO_list.txt")
+
+# Identify genes that are significant based on p-value and delta dNdS criteria
+significantTranscript <- na.omit(Gene_Conservation$Transcript[Gene_Conservation$pval_m0 > -log10(0.05 / nrow(Gene_Conservation)) & Gene_Conservation$delta_dNdS < 0])
+significantTranscript
+write.table(significantTranscript, "Significant_relaxedGenes.txt", quote = F, col.names = F, row.names = F, sep = "\t")
+Gene_Conservation <- Gene_Conservation %>% mutate(SigGene = Transcript %in% significantTranscript)
+# Reconstruct gene list for significant orthogroups
+geneList <- ifelse(Gene_Conservation$Transcript %in% significantTranscript, 1, 0)
+names(geneList) <- Gene_Conservation$Transcript
+
+# Define the function to select genes based on a threshold
+Multiple_threshold_test <- function(allScore) {
+  return(allScore == 1)
+}
+
+# Create a topGO object and run Fisher's test for enrichment
+GOdata <- new("topGOdata", ontology = "BP", allGenes = geneList, geneSel = Multiple_threshold_test,
+              annot = annFUN.gene2GO, gene2GO = geneID2GO, nodeSize = 10)
+resultFisher <- runTest(GOdata, algorithm = "weight01", statistic = "fisher")
+allResOGs <- GenTable(GOdata, classicFisher = resultFisher, ranksOf = "classicFisher", topNodes = 10)
+allResOGs
+
+# Summarize across orthogroups
+OG_summary <- Gene_Conservation %>%
+  group_by(og) %>% 
+  summarise(
+    og_ddNdS = max(delta_dNdS),
+    og_cds = mean(CDS),
+    og_pval_m0 = min(pval_m0),
+    og_nonsyn1 = mean(Nonsyn_Maf1_resid),
+    og_del1 = mean(Del_Maf1_resid),
+    Ngenes = n()
+  )
+ 
+
+siggenes <- Gene_Conservation %>% filter(SigGene)
+sum(siggenes$SigGene_inSigOG)
+sum(Gene_Conservation$SigGene)
+
+```
+
+
+
+```{r}
+# Reading in the MK test results where mutations were found in 10% of the aligned genomes
+MKtest_10pct <- read.table("MKtest_10pct.tsv", header=T)
+
+# Joining the MK test results to the gene conservation data
+Gene_Conservation <- inner_join(Gene_Conservation, MKtest_10pct)
+
+# Extracting the 95th percentile of the MK test results
+percentile <- quantile(Gene_Conservation$Mk_10pct, 0.95, na.rm=T)
+
+# Plotting a histogram of the MK test results
+hist(Gene_Conservation$Mk_10pct, xlim=c(-10,1.1), breaks = 100000)
+
+# Extracting transcripts with an MK test result of 1
+testTranscript <- unique(Gene_Conservation$Transcript[Gene_Conservation$Mk_10pct == 1])
+
+# Creating a gene list based on whether the transcript is in the testTranscript list
+geneList <- ifelse(Gene_Conservation$Transcript %in% testTranscript, 1, 0)
+names(geneList) <- Gene_Conservation$Transcript
+
+# Defining a function that checks if the score is equal to 1
+Multiple_threshold_test <- function (allScore) 
+{
+  return(allScore == 1)
+}
+
+# Creating a topGO object for GO term enrichment analysis
+GOdata <- new("topGOdata", ontology = "BP", allGenes = geneList, geneSel = Multiple_threshold_test,
+              annot = annFUN.gene2GO, gene2GO = geneID2GO, nodeSize = 10)
+
+# Running Fisher's exact test for GO term enrichment
+resultFisher <- runTest(GOdata, algorithm = "weight01", statistic = "fisher")
+
+# Generating a table of top significant GO terms
+allRes <- GenTable(GOdata, classicFisher = resultFisher, ranksOf = "classicFisher", topNodes = 23)
+allRes
+
+# Writing out the significant GO terms to a file
+write.table(allRes, "GOEnrichment_OG_Mk10pct_BP.txt", sep = "\t", quote=F, col.names=T, row.names=F)
+
+```
+
+##Plot delta_dNdS
+```{r}
+
+Gene_Conservation$delta_dNdS[Gene_Conservation$delta_dNdS>2] <-2
+Gene_Conservation <- Gene_Conservation %>% mutate(`Pollen Genes`=Transcript %in% pollen_genes)
+ggplot(Gene_Conservation, aes(x = delta_dNdS, y = pval_m0)) +
+  geom_point(aes(col = `Pollen Genes`)) +
+  ylim(0, 10) +
+  theme_minimal() +
+  labs(x = expression(Delta~dN/dS),y="-log10(p-value)") +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_hline(yintercept = -log10(0.05 / nrow(Gene_Conservation)), linetype = "dotted", color = "black") +
+  theme(axis.title = element_text(size = 14)) # Adjust the 'size' value to your preferred label size
+
+
+OG_summary$og
+OG_summary <- OG_summary %>% mutate(`Pollen Genes`=og %in% Gene_Conservation$og[Gene_Conservation$`Pollen Genes`])
+
+ggplot(OG_summary, aes(x = og_ddNdS, y = og_pval_m0)) +
+  geom_point(aes(col = `Pollen Genes`)) +
+  ylim(0, 10) +
+  theme_minimal() +
+  labs(x = expression(Delta~dN/dS),y="-log10(p-value)") +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black") +
+  geom_hline(yintercept = -log10(0.05 / nrow(OG_summary)), linetype = "dotted", color = "black") +
+  theme(axis.title = element_text(size = 14)) # Adjust the 'size' value to your preferred label size
+```
+
+```{r}
+Gene_Conservation$delta_dNdS[Gene_Conservation$delta_dNdS>2] <- 2
+Sig_genes <-Gene_Conservation %>% filter(Sig_RelaxedGenes==T)
+cor.test(Sig_genes$Nonsyn_Maf1_resid,Sig_genes$delta_dNdS)
+plot(Sig_genes$NonSyn_MAF0.01,Sig_genes$delta_dNdS)
+
+```
+
+
+###RNA differential Expression
+```{r}
+# Load necessary libraries
+library(tidyr)
+library(DESeq2)
+library(scales)  
+
+# Load summary data of RNA processing
+RNA_Summary <- fread("RNA_Processed_Summary.txt.gz")
+colnames(RNA_Summary)[4] <- "RNA_count"
+
+# Rename "ApiMer" tissue to "Flower"
+RNA_Summary$Tissue[RNA_Summary$Tissue == "ApiMer"] <- "Flower"
+colnames(RNA_Summary)
+
+# Check if there are any duplicated genes per germplasm and tissue 
+test <- RNA_Summary %>% group_by(germplasmName, Tissue, GeneV7) %>% summarize(count = n())
+genestoclean <- test$GeneV7[test$count > 1]
+genestoclean <- unique(genestoclean)
+
+# Format the data for easier manipulation in the subsequent pivot
+RNA_Summary_join <- cbind.data.frame(germplasmName_Tissue = paste(RNA_Summary$germplasmName, RNA_Summary$Tissue, sep = "_"), RNA_Summary[, 3:4])
+
+# Pivot the data to have a wider format
+RNA_test <- pivot_wider(RNA_Summary_join, names_from = germplasmName_Tissue, values_from = RNA_count)
+RNA_test <- as.data.frame(RNA_test)
+
+# Filter for relaxed genes and pollen genes
+Relaxed_genes <- substring(significantTranscript, 1, 15)
+pollen6 <- substring(pollen6_genes, 1, 15)
+RelaxedRNA <- RNA_test[RNA_test$GeneV7 %in% Relaxed_genes,]
+pollen6RNA <- RNA_test[RNA_test$GeneV7 %in% pollen6,]
+
+# Clean up any weird duplicated occurrence in the matrix
+badindex <- which(RNA_test[,1] %in% genestoclean)
+for(x in badindex) {
+  for(y in 1:ncol(RNA_test)){
+    RNA_test[x,y] <- max(RNA_test[x,y][[1]])
+  }
+}
+
+# Save and load the cleaned RNA data
+saveRDS(RNA_test, file = "RNASeq_Parsed.txt")
+RNA_test <- readRDS("RNASeq_Parsed.txt")
+
+# Filter for significant transcripts and get the corresponding RNA data
+significantTranscript_sub <- substring(significantTranscript, 1, 15)
+significantTranscript_RNA <- RNA_test[RNA_test$GeneV7 %in% significantTranscript_sub,]
+
+# Functions to compute mean and maximum expression
+Get_Mean_Express <- function(x) {
+  return(mean(as.numeric(unlist(x))))
+}
+
+Get_Max_Express <- function(x) {
+  return(max(as.numeric(unlist(x))))
+}
+
+# Apply the functions to the RNA data for significant transcripts
+significantTranscript_RNA <- cbind.data.frame(Gene = significantTranscript_RNA[, 1], MeanExpress = apply(significantTranscript_RNA[, 2:ncol(significantTranscript_RNA)], 1, Get_Mean_Express), MaxExpress = apply(significantTranscript_RNA[, 2:ncol(significantTranscript_RNA)], 1, Get_Max_Express))
+significantTranscript_RNA
+
+# Prepare for differential expression analysis with DESeq2
+DE_counts <- RNA_test
+metaData <- cbind.data.frame(id = colnames(DE_counts)[2:ncol(DE_counts)], tissue = vapply(colnames(DE_counts)[2:ncol(DE_counts)], function(x) strsplit(x, "_")[[1]][2], FUN.VALUE = character(1)), germplasmName = vapply(colnames(DE_counts)[2:ncol(DE_counts)], function(x) strsplit(x, "_")[[1]][1], FUN.VALUE = character(1)))
+metaData$tissue[metaData$tissue != "Flower"] <- "Non-Flower"
+metaData$tissue <- factor(metaData$tissue, levels = c("Non-Flower", "Flower"))
+
+# Convert counts to integer and add 1 to avoid issues with zeroes in DESeq2
+for(y in 2:ncol(DE_counts)) {
+  DE_counts[y] <- as.integer(unlist(DE_counts[y])) + 1
+}
+
+# Set up and run DESeq2 for differential expression analysis
+dds <- DESeqDataSetFromMatrix(countData = DE_counts, colData = metaData, design = ~tissue, tidy = TRUE)
+dds <- DESeq(dds)
+res <- results(dds)
+head(res)
+res
+
+# Plot the results in a volcano plot
+with(res, plot(log2FoldChange, -log10(pvalue), pch = 20, main = "RNA Volcano plot", xlim = c(-3,3), xlab = "log2FoldChange", col = alpha("black", 0.1), ylim = c(0,200)))
+ntests <- length(res$log2FoldChange)
+abline(h = -log10(0.05/ntests), lty = 2)
+
+# Highlight relaxed genes and pollen genes on the volcano plot
+with(subset(res, row.names(res) %in% Relaxed_genes), points(log2FoldChange, -log10(pvalue), pch = 20, col = "blue"))
+with(subset(res, row.names(res) %in% pollen6), points(log2FoldChange, -log10(pvalue), pch = 20, col = "red"))
+
+# Extract expression of relaxed genes from the results and count how many are significant
+Relaxed_genes_expression <- subset(res, row.names(res) %in% Relaxed_genes)
+Relaxed_genes_expression <- as.data.frame(Relaxed_genes_expression)
+sigflow <- Relaxed_genes_expression[-log10(Relaxed_genes_expression$pvalue) > -log10(0.05/ntests) & Relaxed_genes_expression$log2FoldChange > 0,]
+nrow(sigflow)
+
+```
+
+
+### Make species Tree and otholog occurrence histogram
+```{r}
+##Rphast is gonna have issues if you are using R!=4.2
+library(rphast)
+library(ape)
+library(ggtree)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+filenames <- list.files("1000_MSAs", pattern="*MAFFT", full.names=TRUE)
+aln_list <- lapply(filenames, read.msa)
+ft_flist=list.files("Feature_files", pattern="*gff", full.names=TRUE)
+ft_list=lapply(ft_flist, read.feat)
+aln.4d.list=list()
+for (i in 1:length(aln_list)){
+  aln.4d.list[[i]]=get4d.msa(aln_list[[i]],ft_list[[i]])
+}
+
+random.good.fasta.list=list.files("4d_alignments/",pattern =".fastA")
+random.good.fasta.aln=lapply(random.good.fasta.list,function(x) read.FASTA(paste0("4d_alignments/",x)))
+random.good.fasta.aln[[3]]
+random.good.fasta.alnm=lapply(random.good.fasta.aln,function(x) as.matrix(x))
+
+random.good.dist <- dist.dna(random.good.fasta.alnm[[1]])
+random.good.tree <- njs(random.good.dist)
+random.good.tree_rooted <- root(random.good.tree,"Spurpurea")
+random.good.fasta.list[[1]][1]
+aln.4d.list[[1]]
+Genes_4dMSA_1000_combined <- concat.msa(aln.4d.list,ordered = F,)
+##
+#write.msa(Genes_4dMSA_1000_combined,paste0("Genes_1000_combined_4dSites.fastA"),format = "FASTA")
+#####
+#Very important, need some replace "*" gap character with "-" to get the rest of the code to work
+###
+Genes_4dMSA_1000_fasta <- read.FASTA("Genes_1000_combined_4dSites.fastA", )
+Genes_4dMSA_1000_fasta_matrix <- as.matrix(Genes_4dMSA_1000_fasta)
+Genes_4dMSA_1000_fasta_dist <- dist.dna(Genes_4dMSA_1000_fasta_matrix, pairwise.deletion = T)
+Genes_4dMSA_1000_fasta_tree <- njs(Genes_4dMSA_1000_fasta_dist)
+Genes_4dMSA_1000_fasta_tree_rooted <- root(Genes_4dMSA_1000_fasta_tree,"Sapria_himalayana")
+
+
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "_HiFi",replacement = "",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "_megahit",replacement = "",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "CassavaV7",replacement = "Manihot_esculenta",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "castorbean",replacement = "Ricinus_communis",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "Spurpurea",replacement = "Salix_purpurea",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "hypericum",replacement = "Hypericum",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "Jatropha_Curcas",replacement = "Jatropha_curcas",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "Heveabrasiliensis",replacement = "Hevea_brasiliensis",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label <- gsub(pattern = "_",replacement = " ",x = Genes_4dMSA_1000_fasta_tree_rooted$tip.label)
+Genes_4dMSA_1000_fasta_tree_rooted$tip.label
+colorgroup=rep("Non-Euphorbiaceae",104)
+for(x in 1:104){
+  if(x %in% c(45,52,18,12,1,38,79,9,83,39,84,34,86,37,59,56,55,57,58)){colorgroup[x] <- "Subfamily-Acalyphoideae"}
+  if(x %in% c(36,80,43,69,21,77,4,78,47,68,49,82,14,91,3,92,19,96,35,81,33,87,51,88,50,93,46,94,53)){colorgroup[x] <- "Subfamily-Euphorbioideae"}
+  if(x %in% c(24,63,6,71,44,72,2,90,15,62,16,73,5,74,11,75,10,76,42,64,8,85,22,89,23,70,17,95,40,98,41)){colorgroup[x] <- "Subfamily-Crotonoideae"}
+  
+}
+ggtree(Genes_4dMSA_1000_fasta_tree_rooted,  aes(color=as.factor(colorgroup))) + theme_tree2() + geom_tiplab() + geom_tree() + xlim(-0.01, 1) + 
+  scale_color_manual(values=c("black", "firebrick", "steelblue","forestgreen"),guide="none",  name="Lineage") 
+
+
+Gene_Conservation <- read.table("Gene_Conservation_Summary.tsv",header=T)
+og_depths <- Gene_Conservation %>% group_by()
+Pangenome <- fread("CassavaV7_pangenomeDB.txt.gz")
+Pangenome <- Pangenome %>% group_by(og) %>% filter("CassavaV7" %in% genome)
+
+OG_Occurrence <- Pangenome %>% group_by(og) %>% summarise(length(unique(genome)))
+ggplot(Gene_Conservation,aes(x=Alignment_Depth))+
+  geom_histogram(binwidth = 1, fill="#CC6600")+
+  xlab("# Species")+
+  ggtitle("Ortholog Occurrence Across Assemblies") +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.5, size=25))+
+  theme(text = element_text(size = 20))            
+
+```
+
+
+##Plot BUSCO
+```{r}
+######################################
+#
+# BUSCO summary figure
+# @version 4.0.0
+# @since BUSCO 2.0.0
+# 
+# Copyright (c) 2016-2021, Evgeny Zdobnov (ez@ezlab.org)
+# Licensed under the MIT license. See LICENSE.md file.
+#
+######################################
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library("grid")
+
+# !!! CONFIGURE YOUR PLOT HERE !!! 
+# Output
+my_width <- 20
+my_height <- 15
+my_unit <- "cm"
+
+# Colors
+my_colors <- c("#56B4E9", "#3492C7", "#F0E442", "#F04442")
+# Bar height ratio
+my_bar_height <- 0.75
+
+# Legend
+my_title <- "BUSCO Assessment Results"
+
+# Font
+my_family <- "sans"
+my_size_ratio <- 1
+
+# !!! SEE YOUR DATA HERE !!! 
+# Your data as generated by python, remove or add more
+my_species <- c("Acalypha_hispida", "Acalypha_hispida", "Acalypha_hispida", "Acalypha_hispida", "Aleurites_moluccanus",
+                "Aleurites_moluccanus", "Aleurites_moluccanus", "Aleurites_moluccanus", "Bocquillonia_castaneifolia", 
+                "Bocquillonia_castaneifolia", "Bocquillonia_castaneifolia", "Bocquillonia_castaneifolia", "Breynia_nivosa",
+                "Breynia_nivosa", "Breynia_nivosa", "Breynia_nivosa", "CassavaV7", "CassavaV7", "CassavaV7", 
+                "CassavaV7", "castorbean", "castorbean", "castorbean", "castorbean", "Chamaesyce_celastroides", 
+                "Chamaesyce_celastroides", "Chamaesyce_celastroides", "Chamaesyce_celastroides", 
+                "Cnidoscolus_aconitifolius", "Cnidoscolus_aconitifolius", "Cnidoscolus_aconitifolius", 
+                "Cnidoscolus_aconitifolius", "Cnidoscolus_chayamansa", "Cnidoscolus_chayamansa", "Cnidoscolus_chayamansa", 
+                "Cnidoscolus_chayamansa", "Codiaeum_variegatum", "Codiaeum_variegatum", "Codiaeum_variegatum", "Codiaeum_variegatum", 
+                "Croton_setigerus", "Croton_setigerus", "Croton_setigerus", "Croton_setigerus", "Dalechampia_spathulata", 
+                "Dalechampia_spathulata", "Dalechampia_spathulata", "Dalechampia_spathulata", "Euphorbia_corollata", 
+                "Euphorbia_corollata", "Euphorbia_corollata", "Euphorbia_corollata", "Euphorbia_esula", 
+                "Euphorbia_esula", "Euphorbia_esula", "Euphorbia_esula", "Euphorbia_pulcherrima", "Euphorbia_pulcherrima",
+                "Euphorbia_pulcherrima", "Euphorbia_pulcherrima", "Excoecaria_cochinchinensis", "Excoecaria_cochinchinensis",
+                "Excoecaria_cochinchinensis", "Excoecaria_cochinchinensis", "Flueggea_neowawraea", "Flueggea_neowawraea",
+                "Flueggea_neowawraea", "Flueggea_neowawraea", "Garcia_nutans", "Garcia_nutans", "Garcia_nutans", "Garcia_nutans",
+                "Heveabrasiliensis", "Heveabrasiliensis", "Heveabrasiliensis", "Heveabrasiliensis", "Hura_crepitans", "Hura_crepitans",
+                "Hura_crepitans", "Hura_crepitans", "hypericum_perforatum", "hypericum_perforatum", "hypericum_perforatum", 
+                "hypericum_perforatum", "Jatropha_Curcas", "Jatropha_Curcas", "Jatropha_Curcas", "Jatropha_Curcas", "Jatropha_multifida",
+                "Jatropha_multifida", "Jatropha_multifida", "Jatropha_multifida", "Jatropha_podagrica", "Jatropha_podagrica", 
+                "Jatropha_podagrica", "Jatropha_podagrica", "Mallotus", "Mallotus", "Mallotus", "Mallotus", "Mercurialis_annua", 
+                "Mercurialis_annua", "Mercurialis_annua", "Mercurialis_annua", "Monadenium_arborescens", "Monadenium_arborescens", 
+                "Monadenium_arborescens", "Monadenium_arborescens", "Monadenium_elegans", "Monadenium_elegans", "Monadenium_elegans", 
+                "Monadenium_elegans", "Monadenium_guentheri", "Monadenium_guentheri", "Monadenium_guentheri", "Monadenium_guentheri",
+                "Omphalea", "Omphalea", "Omphalea", "Omphalea", "Pedilanthus_macrocarpus", "Pedilanthus_macrocarpus",
+                "Pedilanthus_macrocarpus", "Pedilanthus_macrocarpus", "Populus_deltoides", "Populus_deltoides", "Populus_deltoides",
+                "Populus_deltoides", "Populus_simonii", "Populus_simonii", "Populus_simonii", "Populus_simonii", "Populus_Trichoocarpa", 
+                "Populus_Trichoocarpa", "Populus_Trichoocarpa", "Populus_Trichoocarpa", "Reutealis_trisperma", "Reutealis_trisperma",
+                "Reutealis_trisperma", "Reutealis_trisperma", "Rhizophora_apiculata", "Rhizophora_apiculata", "Rhizophora_apiculata", 
+                "Rhizophora_apiculata", "Salix_brachista", "Salix_brachista", "Salix_brachista", "Salix_brachista", "Salix_dunnii", 
+                "Salix_dunnii", "Salix_dunnii", "Salix_dunnii", "Salix_suchowensis", "Salix_suchowensis", "Salix_suchowensis", 
+                "Salix_suchowensis", "Sapria_himalayana", "Sapria_himalayana", "Sapria_himalayana", "Sapria_himalayana", "Spurpurea",
+                "Spurpurea", "Spurpurea", "Spurpurea", "SRR7121446", "SRR7121446", "SRR7121446", "SRR7121446", "SRR7121479", "SRR7121479",
+                "SRR7121479", "SRR7121479", "SRR7121540", "SRR7121540", "SRR7121540", "SRR7121540", "SRR7121834", "SRR7121834", "SRR7121834",
+                "SRR7121834", "SRR7121842", "SRR7121842", "SRR7121842", "SRR7121842", "SRR7121892", "SRR7121892", "SRR7121892", "SRR7121892", 
+                "SRR7122023", "SRR7122023", "SRR7122023", "SRR7122023", "SRR7122040", "SRR7122040", "SRR7122040", "SRR7122040", "SRR7122043", 
+                "SRR7122043", "SRR7122043", "SRR7122043", "SRR7122045", "SRR7122045", "SRR7122045", "SRR7122045", "SRR7122067", "SRR7122067", 
+                "SRR7122067", "SRR7122067", "Stillingia_texana", "Stillingia_texana", "Stillingia_texana", "Stillingia_texana")
+
+
+my_species <- gsub(pattern = "Mallotus",replacement = "Mallotus sp.",x = my_species)
+
+my_species <- gsub(pattern = "_HiFi",replacement = "",x = my_species)
+my_species <- gsub(pattern = "_megahit",replacement = "",x = my_species)
+my_species <- gsub(pattern = "CassavaV7",replacement = "Manihot_esculenta",x = my_species)
+my_species <- gsub(pattern = "castorbean",replacement = "Ricinus_communis",x = my_species)
+my_species <- gsub(pattern = "Spurpurea",replacement = "Salix_purpurea",x = my_species)
+my_species <- gsub(pattern = "hypericum",replacement = "Hypericum",x = my_species)
+my_species <- gsub(pattern = "Jatropha_Curcas",replacement = "Jatropha_curcas",x = my_species)
+my_species <- gsub(pattern = "Heveabrasiliensis",replacement = "Hevea_brasiliensis",x = my_species)
+
+my_species <- gsub(pattern = "SRR7121446",replacement = "Euphorbia_tirucalli",x = my_species)
+my_species <- gsub(pattern = "SRR7121479",replacement = "Mallotus_japonicus",x = my_species)
+my_species <- gsub(pattern = "SRR7121540",replacement = "Euphorbia_schlechtendalii",x = my_species)
+my_species <- gsub(pattern = "SRR7121834",replacement = "Triadica_sebifera",x = my_species)
+my_species <- gsub(pattern = "SRR7121842",replacement = "Mallotus_japonicus.2",x = my_species)
+my_species <- gsub(pattern = "SRR7121892",replacement = "Macaranga_tanarius",x = my_species)
+my_species <- gsub(pattern = "SRR7122023",replacement = "Mallotus_repandus",x = my_species)
+my_species <- gsub(pattern = "SRR7122040",replacement = "Croton_laevigatus",x = my_species)
+my_species <- gsub(pattern = "SRR7122043",replacement = "Croton_laevigatus.2",x = my_species)
+my_species <- gsub(pattern = "SRR7122045",replacement = "Vernicia_montana",x = my_species)
+my_species <- gsub(pattern = "SRR7122067",replacement = "Balakata_baccata",x = my_species)
+
+
+my_species <- gsub(pattern = "_",replacement = " ",x = my_species)
+
+
+
+
+my_species <- factor(my_species)
+my_percentage <- c(26.0, 8.4, 27.5, 38.1, 69.3, 25.7, 2.8, 2.2, 85.6, 2.0, 7.9, 4.5, 82.2, 9.2, 4.6, 4.0, 88.7, 9.9, 0.7, 0.7, 97.4, 1.2, 0.6, 0.8, 32.2, 45.5, 12.1, 10.2, 48.9, 50.1, 0.3, 0.7, 70.9, 6.5, 12.9, 9.7, 43.9, 9.8, 24.1, 22.2, 92.4, 1.3, 3.1, 3.2, 93.1, 2.8, 1.9, 2.2, 61.2, 5.9, 17.5, 15.4, 20.0, 1.8, 22.9, 55.3, 85.5, 12.7, 0.5, 1.3, 92.0, 6.3, 0.5, 1.2, 34.5, 44.7, 12.2, 8.6, 20.0, 79.2, 0.3, 0.5, 67.5, 27.4, 1.9, 3.2, 55.5, 7.7, 20.2, 16.6, 75.1, 12.9, 4.2, 7.8, 87.6, 1.6, 1.6, 9.2, 94.8, 1.4, 1.7, 2.1, 94.2, 1.3, 2.4, 2.1, 86.0, 13.0, 0.1, 0.9, 57.8, 40.3, 0.4, 1.5, 44.0, 3.5, 24.8, 27.7, 9.8, 0.5, 17.5, 72.2, 11.6, 0.8, 18.6, 69.0, 56.7, 36.9, 3.7, 2.7, 15.4, 0.5, 19.5, 64.6, 76.2, 21.7, 0.4, 1.7, 74.3, 23.7, 0.6, 1.4, 76.4, 21.9, 0.4, 1.3, 97.1, 1.6, 0.4, 0.9, 92.6, 4.5, 0.8, 2.1, 81.3, 16.8, 0.4, 1.5, 84.1, 13.9, 0.6, 1.4, 78.4, 18.0, 1.2, 2.4, 45.2, 0.8, 2.9, 51.1, 79.4, 18.0, 0.6, 2.0, 87.9, 1.9, 6.0, 4.2, 88.1, 2.5, 5.2, 4.2, 85.3, 7.0, 3.8, 3.9, 67.5, 19.7, 7.5, 5.3, 87.5, 2.5, 6.2, 3.8, 88.8, 1.6, 5.8, 3.8, 92.6, 1.9, 3.2, 2.3, 82.8, 4.0, 7.5, 5.7, 86.3, 3.3, 5.7, 4.7, 90.1, 1.6, 4.8, 3.5, 78.1, 16.4, 3.2, 2.3, 32.8, 9.5, 26.5, 31.2)
+my_values <- c(605, 196, 640, 885, 1613, 598, 65, 50, 1990, 47, 184, 105, 1911, 215, 108, 92, 2062, 231, 16, 17, 2266, 29, 13, 18, 750, 1059, 281, 236, 1137, 1166, 7, 16, 1648, 151, 301, 226, 1020, 227, 561, 518, 2149, 31, 72, 74, 2166, 65, 45, 50, 1423, 137, 406, 360, 466, 41, 532, 1287, 1988, 296, 12, 30, 2140, 146, 11, 29, 802, 1040, 284, 200, 465, 1842, 6, 13, 1570, 638, 44, 74, 1290, 178, 469, 389, 1747, 299, 98, 182, 2038, 37, 38, 213, 2206, 32, 39, 49, 2190, 31, 56, 49, 2000, 302, 3, 21, 1344, 937, 9, 36, 1023, 82, 577, 644, 227, 12, 407, 1680, 269, 18, 433, 1606, 1319, 858, 85, 64, 358, 11, 453, 1504, 1773, 504, 10, 39, 1729, 552, 15, 30, 1776, 509, 9, 32, 2258, 38, 9, 21, 2155, 104, 19, 48, 1891, 390, 10, 35, 1956, 324, 13, 33, 1823, 418, 29, 56, 1051, 18, 68, 1189, 1847, 419, 14, 46, 2044, 45, 140, 97, 2049, 59, 122, 96, 1984, 163, 89, 90, 1570, 458, 174, 124, 2035, 58, 144, 89, 2066, 37, 136, 87, 2155, 45, 75, 51, 1926, 93, 174, 133, 2007, 77, 132, 110, 2095, 38, 111, 82, 1816, 382, 74, 54, 762, 220, 617, 727)
+BUSCO_df <- cbind.data.frame(my_species,my_percentage,my_values,Class=c("Single","Duplicated","Fragmented","Missing"))
+library(dplyr)
+BUSCO_summary <- BUSCO_df %>% group_by(my_species) %>% filter(Class == "Single" | Class =="Duplicated") %>% summarise(present=sum(my_values))
+new_order <- BUSCO_summary$my_species[order(BUSCO_summary$present,decreasing = F)]
+my_species <- factor(my_species,new_order) # reorder your species here just by changing the values in the vector :
+
+Assembly_stats <- read.table("Assembly_stats.txt",header = T)
+Sources <- Assembly_stats[,c(1,7)]
+colnames(BUSCO_df) <- c("Genome","Percentage","Value","Class")
+Sources$Genome <- gsub(pattern = "_HiFi",replacement = "",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "_megahit",replacement = "",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "CassavaV7",replacement = "Manihot_esculenta",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "castorbean",replacement = "Ricinus_communis",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "Spurpurea",replacement = "Salix_purpurea",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "hypericum",replacement = "Hypericum",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "Jatropha_Curcas",replacement = "Jatropha_curcas",x = Sources$Genome )
+Sources$Genome  <- gsub(pattern = "Heveabrasiliensis",replacement = "Hevea_brasiliensis",x = Sources$Genome )
+
+Sources$Genome <- gsub(pattern = "SRR7121446",replacement = "Euphorbia_tirucalli",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7121479",replacement = "Mallotus_japonicus",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7121540",replacement = "Euphorbia_schlechtendalii",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7121834",replacement = "Triadica_sebifera",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7121842",replacement = "Mallotus_japonicus.2",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7121892",replacement = "Macaranga_tanarius",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7122023",replacement = "Mallotus_repandus",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7122040",replacement = "Croton_laevigatus",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7122043",replacement = "Croton_laevigatus.2",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7122045",replacement = "Vernicia_montana",x = Sources$Genome)
+Sources$Genome <- gsub(pattern = "SRR7122067",replacement = "Balakata_baccata",x = Sources$Genome)
+
+Sources$Genome  <- gsub(pattern = "_",replacement = " ",x = Sources$Genome )
+
+
+BUSCO_df <- inner_join(BUSCO_df,Sources)
+
+######################################
+######################################
+######################################
+# Code to produce the graph
+labsize = 1
+if (length(levels(my_species)) > 10){
+ labsize = 0.66
+}
+print("Plotting the figure ...")
+category <- c(rep(c("S","D","F","M"),c(1)))
+category <-factor(category)
+category = factor(category,levels(category)[c(4,1,2,3)])
+df = data.frame(my_species,my_percentage,my_values,category)
+
+figure <- ggplot() + 
+  
+  geom_bar(aes(y = my_percentage, x = my_species, fill = category), position = position_stack(reverse = TRUE), data = df, stat="identity", width=my_bar_height) + 
+  coord_flip() + 
+  theme_gray(base_size = 8) + 
+  scale_y_continuous(labels = c("0","20","40","60","80","100"), breaks = c(0,20,40,60,80,100)) + 
+  scale_fill_manual(values = my_colors,labels =c(" Complete (C) and single-copy (S)  ",
+                                                 " Complete (C) and duplicated (D)",
+                                                 " Fragmented (F)  ",
+                                                 " Missing (M)")) +   
+  ggtitle(my_title) + 
+  xlab("") + 
+  ylab("\n%BUSCOs") + 
+
+  theme(plot.title = element_text(family=my_family, hjust=0.5, colour = "black", size = rel(2.2)*my_size_ratio, face = "bold")) + 
+  theme(legend.position="top",legend.title = element_blank()) + 
+  theme(legend.text = element_text(family=my_family, size = rel(1.2)*my_size_ratio)) + 
+  theme(panel.background = element_rect(color="#FFFFFF", fill="white")) + 
+  theme(panel.grid.minor = element_blank()) + 
+  theme(panel.grid.major = element_blank()) +
+  theme(axis.text.y = element_text(family=my_family, colour = "black", size = rel(1.66)*my_size_ratio)) + 
+  theme(axis.text.x = element_text(family=my_family, colour = "black", size = rel(1.66)*my_size_ratio)) + 
+  theme(axis.line = element_line(size=1*my_size_ratio, colour = "black")) + 
+  theme(axis.ticks.length = unit(.85, "cm")) + 
+  theme(axis.ticks.y = element_line(colour="white", size = 0)) + 
+  theme(axis.ticks.x = element_line(colour="#222222")) + 
+  theme(axis.ticks.length = unit(0.4, "cm")) + 
+  theme(axis.title.x = element_text(family=my_family, size=15)) + 
+  guides(fill = guide_legend(override.aes = list(colour = NULL))) +
+  guides(fill=guide_legend(nrow=2,byrow=TRUE))+
+  theme(axis.text.y = element_text(size = 10,
+                                   face = "bold",
+                                   colour = c("#7570b3","#7570b3","#7570b3","#d95f02","#7570b3","#7570b3","#d95f02","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#d95f02","#d95f02","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#7570b3","#d95f02","#7570b3","#7570b3","#7570b3","#7570b3","#d95f02","#d95f02","#d95f02","#d95f02","#d95f02","#1b9e77","#d95f02","#d95f02","#1b9e77","#d95f02","#1b9e77","#d95f02","#d95f02","#1b9e77","#1b9e77","#1b9e77","#1b9e77")))
+  for(i in rev(c(1:length(levels(my_species))))){
+    detailed_values <- my_values[my_species==my_species[my_species==levels(my_species)[i]]]
+    totals <- sum(detailed_values)
+    figure <- figure + 
+    annotate("text", label=paste("C:", detailed_values[1] + detailed_values[2], " [S:", detailed_values[1], ", D:", detailed_values[2], "], F:", detailed_values[3], ", M:", detailed_values[4], ", n:", totals, sep=""), 
+             y=3, x = i, size = labsize*4*my_size_ratio, colour = "black", hjust=0, family=my_family)
+  }
+  
+figure
+print("Done")
+library(scales)
+#show_col(hue_pal()(3))
+```
+
+
+
+
+
+
+
+
+
+###Chomosome mapping
+```{r}
+setwd("C:/Users/evanl/Downloads/")
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(chromoMap)
+
+C_Chromosomes <- read.table("Cassava_V7_Chromosomes.txt")
+Bed_File <- read.table("Cassava_V7_Genecoverage250k.bed")
+Bed_File <- cbind.data.frame(V0=as.character(1:nrow(Bed_File)),Bed_File[,c(1:3,7)])
+Bed_GeneDensity <- Bed_File
+Bed_File <- Bed_File[,c(1:4)]
+
+
+# Gene Density
+chromoMap(list(C_Chromosomes),list(Bed_GeneDensity), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T,
+          plots = "bar")
+chromoMap(list(C_Chromosomes),list(Bed_GeneDensity), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T)
+
+
+
+Genes_bed <- read.table("Transcript_locations.tsv",header=F)
+Gene_Conservation <- read.table("Gene_Conservation_Summary.tsv",header = T)
+colnames(Genes_bed)[1] <- "Gene"
+Genes_bed <- inner_join(Genes_bed,Gene_Conservation,by="Gene")
+
+
+
+
+#dNdS
+Genes_bed$dNdSCassava[is.na(Genes_bed$dNdSCassava)] <- 2
+Genes_dNdS <- Genes_bed[,c("Gene","V2","V3","V4","dNdSCassava")]
+# 
+# chromoMap(list(C_Chromosomes),list(Genes_dNdS), ploidy = 1,data_based_color_map = T,
+#           data_type = "numeric",
+#           heat_map = T,n_win.factor = 1,
+#           win.summary.display=T,
+#           plots = "bar")
+
+window_dNdS <- c()
+for(x in 1:nrow(Bed_File)){
+  window_dNdS <- c(window_dNdS,mean(Genes_dNdS$dNdSCassava[Genes_dNdS$V2==Bed_File[x,2] & Genes_dNdS$V3>= Bed_File[x,3] & Genes_dNdS$V4 <= Bed_File[x,4]]))
+}
+
+Bed_dNdS <- cbind.data.frame(Bed_File[,c(1:4)],dNdS=window_dNdS)
+Bed_dNdS$dNdS[Bed_dNdS$dNdS > 1] <- 1
+Bed_dNdS$dNdS[is.na(Bed_dNdS$dNdS)] <- 0
+chromoMap(list(C_Chromosomes),list(Bed_dNdS), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T,
+          plots = "bar")
+
+chromoMap(list(C_Chromosomes),list(Bed_dNdS), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T)
+
+
+#Taxa alignable
+Genes_depth <- Genes_bed[,c("Gene","V2","V3","V4","Alignment_Depth")]
+
+window_depth <- c()
+for(x in 1:nrow(Bed_File)){
+  window_depth <- c(window_depth,mean(Genes_depth$Alignment_Depth[Genes_depth$V2==Bed_File[x,2] & Genes_depth$V3>= Bed_File[x,3] & Genes_depth$V4 <= Bed_File[x,4]],na.rm=T))
+}
+
+Bed_depth <- cbind.data.frame(Bed_File,depth=window_depth)
+Bed_depth$depth[is.na(Bed_depth$depth)]<- 0
+chromoMap(list(C_Chromosomes),list(Bed_depth), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T,
+          plots = "bar",
+          legend = T)
+chromoMap(list(C_Chromosomes),list(Bed_depth), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T,
+          legend = T)
+
+
+##RVIS
+Genes_Nonsyn_Maf1_resid <- Genes_bed[,c("Gene","V2","V3","V4","Nonsyn_Maf1_resid")]
+window_Nonsyn_Maf1_resid <- c()
+for(x in 1:nrow(Bed_File)){
+  window_Nonsyn_Maf1_resid <- c(window_Nonsyn_Maf1_resid,mean(Genes_Nonsyn_Maf1_resid$Nonsyn_Maf1_resid[Genes_Nonsyn_Maf1_resid$V2==Bed_File[x,2] & Genes_Nonsyn_Maf1_resid$V3>= Bed_File[x,3] & Genes_Nonsyn_Maf1_resid$V4 <= Bed_File[x,4]],na.rm=T))
+}
+Bed_Nonsyn_Maf1_resid <- cbind.data.frame(Bed_File,Nonsyn_Maf1_resid=window_Nonsyn_Maf1_resid)
+Bed_Nonsyn_Maf1_resid$Nonsyn_Maf1_resid[is.na(Bed_Nonsyn_Maf1_resid$Nonsyn_Maf1_resid)] <- 0
+chromoMap(list(C_Chromosomes),list(Bed_Nonsyn_Maf1_resid), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T,
+          legend = T)
+
+
+# DRVIS
+Genes_bed$Del_Maf1_resid
+Genes_Del_Maf1_resid <- Genes_bed[,c("Gene","V2","V3","V4","Del_Maf1_resid")]
+
+window_Del_Maf1_resid <- c()
+for(x in 1:nrow(Bed_File)){
+  window_Del_Maf1_resid <- c(window_Del_Maf1_resid,mean(Genes_Del_Maf1_resid$Del_Maf1_resid[Genes_Del_Maf1_resid$V2==Bed_File[x,2] & Genes_Del_Maf1_resid$V3>= Bed_File[x,3] & Genes_Del_Maf1_resid$V4 <= Bed_File[x,4]],na.rm=T))
+}
+
+Bed_Del_Maf1_resid <- cbind.data.frame(Bed_File,Del_Maf1_resid=window_Del_Maf1_resid)
+Bed_Del_Maf1_resid$Del_Maf1_resid[is.na(Bed_Del_Maf1_resid$Del_Maf1_resid)] <- 0
+chromoMap(list(C_Chromosomes),list(Bed_Del_Maf1_resid), ploidy = 1,data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T,
+          legend = T)
+
+
+
+#Delta dNdS
+
+Genes_delta_dNdS <- Genes_bed[,c("Gene","V2","V3","V4","delta_dNdS")]
+Genes_delta_dNdS$delta_dNdS[Genes_delta_dNdS$delta_dNdS > 2] <- 2
+
+window_delta_dNdS <- c()
+for(x in 1:nrow(Bed_File)){
+  window_delta_dNdS <- c(window_delta_dNdS,mean(Genes_delta_dNdS$delta_dNdS[Genes_delta_dNdS$V2==Bed_File[x,2] & Genes_delta_dNdS$V3>= Bed_File[x,3] & Genes_delta_dNdS$V4 <= Bed_File[x,4]],na.rm=T))
+}
+
+Bed_delta_dNdS <- cbind.data.frame(Bed_File,delta_dNdS=window_delta_dNdS)
+Bed_delta_dNdS$delta_dNdS[is.na(Bed_delta_dNdS$delta_dNdS)] <- 0
+Bed_delta_dNdS$delta_dNdS <- Bed_delta_dNdS$delta_dNdS * -1
+chromoMap(list(C_Chromosomes),list(Bed_delta_dNdS), 
+          ploidy = 1,
+          data_based_color_map = T,
+          data_type = "numeric",
+          legend = T)
+
+
+# Detiorated Paralogues
+Deteriorated_paralogues <- read.table("Deteriorated_Paralogues_Strict.bed")
+Deteriorated_paralogues <- cbind(1:nrow(Deteriorated_paralogues),Deteriorated_paralogues)
+
+window_Deteriorated_paralogues <- c()
+for(x in 1:nrow(Bed_File)){
+  window_Deteriorated_paralogues <- c(window_Deteriorated_paralogues,mean(Deteriorated_paralogues$V1==Bed_File[x,2] & Deteriorated_paralogues$V2 >= Bed_File[x,3] & Deteriorated_paralogues$V3 <= Bed_File[x,4],na.rm=T))
+}
+
+Bed_window_Deteriorated_paralogues <- cbind.data.frame(Bed_File,Deteriorated_paralogues=window_Deteriorated_paralogues)
+chromoMap(list(C_Chromosomes),list(Bed_window_Deteriorated_paralogues), 
+          ploidy = 1,data_based_color_map = T,
+          data_type = "numeric")
+
+#Latin America Progenitor Sweeps
+Sweeps <- read.table("sweepRegions2_LAC_PRO_filt_V7.bed")
+Sweeps <- cbind(1:nrow(Sweeps),Sweeps)
+
+chromoMap(list(C_Chromosomes),list(Sweeps),ploidy = 1)
+
+###Genetic Map 
+GeneticMap_bed <- read.table("geneticMap_JGI_V7.bed")
+window_GeneticMap_bed <- c()
+for(x in 1:nrow(Bed_File)){
+  window_GeneticMap_bed <- c(window_GeneticMap_bed,max(GeneticMap_bed$V4[GeneticMap_bed$V1==Bed_File[x,2] & GeneticMap_bed$V2 >= Bed_File[x,3] & GeneticMap_bed$V3 <= Bed_File[x,4]],na.rm=T) - min(GeneticMap_bed$V4[GeneticMap_bed$V1==Bed_File[x,2] & GeneticMap_bed$V2 >= Bed_File[x,3] & GeneticMap_bed$V3 <= Bed_File[x,4]],na.rm=T))
+}
+
+window_GeneticMap_bed <- c()
+for(x in 1:nrow(Bed_File)){
+  if(sum(GeneticMap_bed$V1==Bed_File[x,2] & GeneticMap_bed$V2 >= Bed_File[x,3] & GeneticMap_bed$V3 <= Bed_File[x,4]) > 0 )
+  {
+  window_GeneticMap_bed <- c(window_GeneticMap_bed,max(GeneticMap_bed$V4[GeneticMap_bed$V1==Bed_File[x,2] & GeneticMap_bed$V2 >= Bed_File[x,3] & GeneticMap_bed$V3 <= Bed_File[x,4]],na.rm=T) - min(GeneticMap_bed$V4[GeneticMap_bed$V1==Bed_File[x,2] & GeneticMap_bed$V2 >= Bed_File[x,3] & GeneticMap_bed$V3 <= Bed_File[x,4]],na.rm=T))
+  }
+  else{window_GeneticMap_bed <- c(window_GeneticMap_bed,0)}
+}
+
+
+plot(1:length(window_GeneticMap_bed),window_GeneticMap_bed, ylim = c(0,5))
+
+Bed_GeneticMap_bed <- cbind.data.frame(Bed_File,GeneticMap_bed=window_GeneticMap_bed)
+Bed_GeneticMap_bed$GeneticMap_bed[Bed_GeneticMap_bed$GeneticMap_bed > 5] <- 5
+chromoMap(list(C_Chromosomes),list(Bed_GeneticMap_bed), 
+          ploidy = 1,
+          data_based_color_map = T,
+          data_type = "numeric",
+          heat_map = T,n_win.factor = 1,
+          win.summary.display=T)
+
+
+
+LRT_dndsdiff <- LRT_OG_Homeologs[,c("Gene","dNds_difffromMean")]
+Homeologs_bed <- inner_join(Genes_bed,LRT_dndsdiff,by="Gene")
+Genes_ogdelta_dNdS <- Homeologs_bed[,c("Gene","V2","V3","V4","dNds_difffromMean")]
+Genes_ogdelta_dNdS$dNds_difffromMean[Genes_delta_dNdS$dNds_difffromMean > 2] <- 2
+
+window_ogdelta_dNdS <- c()
+for(x in 1:nrow(Bed_File)){
+  window_ogdelta_dNdS <- c(window_ogdelta_dNdS,mean(Genes_ogdelta_dNdS$dNds_difffromMean[Genes_ogdelta_dNdS$V2==Bed_File[x,2] & Genes_ogdelta_dNdS$V3>= Bed_File[x,3] & Genes_ogdelta_dNdS$V4 <= Bed_File[x,4]],na.rm=T))
+}
+
+Bed_ogdelta_dNdS <- cbind.data.frame(Bed_File,dNds_difffromMean=window_ogdelta_dNdS)
+
+Bed_ogdelta_dNdS$dNds_difffromMean[is.na(Bed_ogdelta_dNdS$dNds_difffromMean)] <- 0
+Bed_ogdelta_dNdS$dNds_difffromMean[Bed_ogdelta_dNdS$dNds_difffromMean > 0.5 ] <- 0.5
+Bed_ogdelta_dNdS$dNds_difffromMean[Bed_ogdelta_dNdS$dNds_difffromMean < -0.5 ] <- -0.5
+
+chromoMap(list(C_Chromosomes),list(Bed_ogdelta_dNdS), 
+          ploidy = 1,
+          data_based_color_map = T,
+          data_type = "numeric",
+          legend = T)
+
+```
