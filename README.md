@@ -22,6 +22,12 @@ The core of this repository revolves around the Rmarkdown workbook, `CassavaEvol
 
 8. **Mesculenta_GOterms_simple.tsv**: Long format of `MeGO_list.txt`.
 
+## Large External Input Files
+Large input files can be found through zenodo id: 10.5281/zenodo.10246960 (Upon Publication)
+1. 	**CassavaV7_pangenomeDB.txt.gz**: Output table from GENESPACE (https://github.com/jtlovell/GENESPACE) Producing Orthogroups [og].
+
+2. 	**RNA_Processed_Summary.txt.gz**: RNA Expresion for Cassava genes sourced from Cassava study (https://doi.org/10.1038/s41598-021-02794-y).
+
 ## Intermediate Tables
 1. **RVIS_Summary.tsv**: RVIS table of variants at each gene.
 
