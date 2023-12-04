@@ -34,3 +34,46 @@ Large input files can be found through zenodo id: 10.5281/zenodo.10246960 (Upon 
 2. **1000_MSAs.zip** and **Feature_files.zip**: Folders containing 1000 gene MSAs for generations of the species tree.
 
 3. **Genes_1000_combined_4dSites.fastA**: Concatenated multiple sequence alignment containing only 4-fold degenerate sites.
+
+## Output Table
+**CassavaV8_Gene_Conservation_Analyses.tsv**
+Column Names and Explanation
+1. Transcript - CassavaV7 gene names + Transcript identifier
+2. Total_SNPs - Total Number of SNPs in Cassava Hapmap in the CDS regions of this gene
+3. NonSyn_MAF0.01 - Total Number of Nonsynonymoous SNPs in Cassava Hapmap in the CDS regions of this gene with a minor allele frequency filter of 1 %
+4. NonSyn_MAF0.05 - Total Number of Nonsynonymoous SNPs in Cassava Hapmap in the CDS regions of this gene with a minor allele frequency filter of 5 %
+5. Del_MAF0.01 - Total Number of Deleterious SNPs in Cassava Hapmap in the CDS regions of this gene with a minor allele frequency filter of 1 %
+6. Del_MAF0.05  - Total Number of Deleterious SNPs in Cassava Hapmap in the CDS regions of this gene with a minor allele frequency filter of 5 %
+7. Nonsyn_Maf1_resid - Residual for regression of NonSyn_MAF0.01 ~ Total_SNPs
+8. Nonsyn_Maf5_resid - Residual for regression of NonSyn_MAF0.05 ~ Total_SNPs
+9. Del_Maf1_resid - Residual for regression of Del_MAF0.01 ~ Total_SNPs
+10. Del_Maf5_resid - Residual for regression of Del_MAF0.05 ~ Total_SNPs
+11. og - Orthogolog Group identifier produced by GENESPACE
+12. Gene - Gene to which the transcript belongs
+13. Chromosome 
+14. TL - Tree Length for RAxML tree analyzed by PAML
+15. FvsM0 - F-statistic for comparison of Cassava branch of gene tree to rest of the tree
+16. FvsNeutral - F-statistic for comparison of Cassava branch of gene tree to a neutral model (dN/dS =1)
+17. dNdSTree - dN/dS ratio for the entire gene tree
+18. dNdSCassava - dN/dS ratio for Cassava branch of the gene tree
+19. Alignment_Depth - # of Species present in Multiple Sequence Alignment used for PAML 
+20. UTR5 - Length of 5' Utranslated Region
+21. UTR3  - Length of 3' Utranslated Region
+22. CDS - Length of Protein Coding Region
+23. Start_Codon - 3 base pair start codon
+24. Stop_Codon - 3 base pair stop codon
+25. pval_m0 - Pvalue from FvsM0 F-statistic
+26. pval_neutral - Pvalue from FvsNeutral F-statistic
+27. delta_dNdS - (dNdSTree - dNdSCassava)
+28. RowNum
+29. PnPs - Number of nonsynonymous snps divided by total snps for Cassava HapMap
+30. dNdS - Copy of dNdSCassava
+31. Alpha_original - MK test stastic 
+32. Alpha_Asymptotic - - MK test stastic using asymptotic method (Not Reliable)
+33. Alpha_Default - MK test stastic using 5% MAF
+34. Mk_test  - MK test stastic using 10% MAF
+35. NI - Neutrality Index
+36. SigGene - T/F is the gene under significantly relaxed selection (pval_m0 < bonferonni correction)
+37. SigGene_inSigOG - T/F is the gene & other genes in Ortholog Group all under significantly relaxed selection (pval_m0 < bonferonni correction)
+
+
