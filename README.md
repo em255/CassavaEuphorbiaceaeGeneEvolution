@@ -37,7 +37,9 @@ Large input files can be found through zenodo id: 10.5281/zenodo.10246960 (Upon 
 
 ## Output Table
 **CassavaV8_Gene_Conservation_Analyses.tsv**
+
 Column Names and Explanation
+
 1. Transcript - CassavaV7 gene names + Transcript identifier
 2. Total_SNPs - Total Number of SNPs in Cassava Hapmap in the CDS regions of this gene
 3. NonSyn_MAF0.01 - Total Number of Nonsynonymoous SNPs in Cassava Hapmap in the CDS regions of this gene with a minor allele frequency filter of 1 %
