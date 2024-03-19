@@ -28,6 +28,7 @@ Large input files can be found through zenodo id: 10.5281/zenodo.10246960 (Upon 
 
 2. 	**RNA_Processed_Summary.txt.gz**: RNA Expresion for Cassava genes sourced from Cassava study (https://doi.org/10.1038/s41598-021-02794-y).
 
+3.  **26k_genes_DAF.tsv.gz**: Derived allele frequencies for 26k genes that passed filters
 ## Intermediate Tables
 1. **RVIS_Summary.tsv**: RVIS table of variants at each gene.
 
